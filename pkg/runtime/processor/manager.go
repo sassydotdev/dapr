@@ -16,13 +16,16 @@ package processor
 import (
 	"context"
 	"fmt"
+	"io"
 
 	"github.com/dapr/durabletask-go/backend"
 
 	"github.com/dapr/components-contrib/bindings"
 	componentsapi "github.com/dapr/dapr/pkg/apis/components/v1alpha1"
 	subapi "github.com/dapr/dapr/pkg/apis/subscriptions/v2alpha1"
+	runtimev1pb "github.com/dapr/dapr/pkg/proto/runtime/v1"
 	"github.com/dapr/dapr/pkg/runtime/meta"
+	bindingProcessor "github.com/dapr/dapr/pkg/runtime/processor/binding"
 	rtpubsub "github.com/dapr/dapr/pkg/runtime/pubsub"
 )
 
@@ -56,6 +59,8 @@ type SubscribeManager interface {
 
 type BindingManager interface {
 	SendToOutputBinding(context.Context, string, *bindings.InvokeRequest) (*bindings.InvokeResponse, error)
+	SendToOutputBindingStream(context.Context, runtimev1pb.Dapr_InvokeBindingAlpha1Server, string, *runtimev1pb.InvokeBindingStreamRequestInitial, io.Reader) error
+	SendToOutputBindingStreamHTTP(ctx context.Context, name string, operation string, metadata map[string]string, data io.Reader) (*bindingProcessor.OutputBindingStreamHTTPResult, error)
 
 	StartReadingFromBindings(context.Context) error
 	StopReadingFromBindings(forever bool)

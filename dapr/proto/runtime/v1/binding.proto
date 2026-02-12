@@ -15,6 +15,8 @@ syntax = "proto3";
 
 package dapr.proto.runtime.v1;
 
+import "dapr/proto/common/v1/common.proto";
+
 option csharp_namespace = "Dapr.Client.Autogen.Grpc.v1";
 option java_outer_classname = "DaprProtos";
 option java_package = "io.dapr.v1";
@@ -49,4 +51,44 @@ message InvokeBindingResponse {
 
   // The metadata returned from an external system
   map<string, string> metadata = 2;
+}
+
+// InvokeBindingStreamRequest is the streaming request for output binding invocation.
+// The first message must contain initial_request, and subsequent messages contain payload chunks.
+message InvokeBindingStreamRequest {
+  oneof invoke_binding_stream_request_type {
+    // Initial request containing binding configuration (must be first message)
+    InvokeBindingStreamRequestInitial initial_request = 1;
+    // Subsequent data chunks
+    common.v1.StreamPayload payload = 2;
+  }
+}
+
+// InvokeBindingStreamRequestInitial contains the initial binding configuration for streaming
+message InvokeBindingStreamRequestInitial {
+  // The name of the output binding to invoke.
+  string name = 1;
+
+  // The name of the operation type for the binding to invoke
+  string operation = 2;
+
+  // The metadata passing to output binding components
+  map<string, string> metadata = 3;
+}
+
+// InvokeBindingStreamResponse is the streaming response from output binding invocation.
+// The first message contains initial_response with metadata, subsequent messages contain payload chunks.
+message InvokeBindingStreamResponse {
+  oneof invoke_binding_stream_response_type {
+    // Initial response acknowledging stream setup
+    InvokeBindingStreamResponseInitial initial_response = 1;
+    // Data chunks from the binding response
+    common.v1.StreamPayload payload = 2;
+  }
+}
+
+// InvokeBindingStreamResponseInitial is sent after stream is established
+message InvokeBindingStreamResponseInitial {
+  // Response metadata from the binding
+  map<string, string> metadata = 1;
 }

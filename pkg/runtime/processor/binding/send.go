@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -32,15 +33,20 @@ import (
 	"github.com/dapr/components-contrib/state"
 	componentsV1alpha1 "github.com/dapr/dapr/pkg/apis/components/v1alpha1"
 	"github.com/dapr/dapr/pkg/components"
+	bindingsLoader "github.com/dapr/dapr/pkg/components/bindings"
 	stateLoader "github.com/dapr/dapr/pkg/components/state"
 	diag "github.com/dapr/dapr/pkg/diagnostics"
 	diagConsts "github.com/dapr/dapr/pkg/diagnostics/consts"
 	diagUtils "github.com/dapr/dapr/pkg/diagnostics/utils"
 	invokev1 "github.com/dapr/dapr/pkg/messaging/v1"
+	commonv1pb "github.com/dapr/dapr/pkg/proto/common/v1"
 	runtimev1pb "github.com/dapr/dapr/pkg/proto/runtime/v1"
 	"github.com/dapr/dapr/pkg/resiliency"
 	"github.com/dapr/dapr/pkg/runtime/processor/binding/input"
 )
+
+// streamBufferSize is the buffer size used when streaming data to/from bindings.
+const streamBufferSize = 32 * 1024 // 32KB
 
 func (b *binding) StartReadingFromBindings(ctx context.Context) error {
 	b.lock.Lock()
@@ -203,6 +209,424 @@ func (b *binding) SendToOutputBinding(ctx context.Context, name string, req *bin
 		return nil, fmt.Errorf("binding %s does not support operation %s. supported operations:%s", name, req.Operation, strings.Join(supported, " "))
 	}
 	return nil, fmt.Errorf("couldn't find output binding %s", name)
+}
+
+// SendToOutputBindingStream handles streaming output binding invocations.
+// It reads data from the input stream and writes responses to the output stream.
+// For bindings that don't support streaming, it falls back to buffered invocation.
+func (b *binding) SendToOutputBindingStream(
+	ctx context.Context,
+	stream runtimev1pb.Dapr_InvokeBindingAlpha1Server,
+	name string,
+	initialReq *runtimev1pb.InvokeBindingStreamRequestInitial,
+	data io.Reader,
+) error {
+	operation := bindings.OperationKind(initialReq.GetOperation())
+	if operation == "" {
+		return errors.New("operation field is missing from request")
+	}
+
+	binding, ok := b.compStore.GetOutputBinding(name)
+	if !ok {
+		return fmt.Errorf("couldn't find output binding %s", name)
+	}
+
+	// Check if operation is supported
+	ops := binding.Operations()
+	var operationSupported bool
+	for _, o := range ops {
+		if o == operation {
+			operationSupported = true
+			break
+		}
+	}
+	if !operationSupported {
+		supported := make([]string, 0, len(ops))
+		for _, o := range ops {
+			supported = append(supported, string(o))
+		}
+		return fmt.Errorf("binding %s does not support operation %s. supported operations:%s", name, operation, strings.Join(supported, " "))
+	}
+
+	// Check if the binding supports streaming
+	streamingBinding, isStreaming := binding.(bindingsLoader.StreamingOutputBinding)
+	if isStreaming {
+		return b.sendToOutputBindingStreamNative(ctx, stream, name, streamingBinding, initialReq, data)
+	}
+
+	// Fallback to buffered approach for non-streaming bindings
+	return b.sendToOutputBindingStreamFallback(ctx, stream, name, binding, initialReq, data)
+}
+
+// sendToOutputBindingStreamNative uses the native streaming interface of the binding.
+func (b *binding) sendToOutputBindingStreamNative(
+	ctx context.Context,
+	stream runtimev1pb.Dapr_InvokeBindingAlpha1Server,
+	name string,
+	binding bindingsLoader.StreamingOutputBinding,
+	initialReq *runtimev1pb.InvokeBindingStreamRequestInitial,
+	data io.Reader,
+) error {
+	// Create streaming request
+	streamReq := &bindingsLoader.StreamInvokeRequest{
+		Operation: bindings.OperationKind(initialReq.GetOperation()),
+		Metadata:  initialReq.GetMetadata(),
+	}
+
+	// Invoke the streaming binding with resiliency policy applied to stream creation
+	// Note: Resiliency (timeout, circuit breaker) applies to establishing the stream.
+	// Once established, the stream session proceeds without retry since partial data
+	// may have already been transmitted.
+	policyRunner := resiliency.NewRunner[bindingsLoader.StreamInvoker](ctx,
+		b.resiliency.ComponentOutboundPolicy(name, resiliency.Binding),
+	)
+	invoker, err := policyRunner(func(ctx context.Context) (bindingsLoader.StreamInvoker, error) {
+		return binding.InvokeStream(ctx, streamReq)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to invoke streaming binding: %w", err)
+	}
+	defer invoker.Close()
+
+	// Start goroutine to send data to the binding
+	errCh := make(chan error, 2)
+	go func() {
+		buf := make([]byte, streamBufferSize)
+		for {
+			n, readErr := data.Read(buf)
+			if n > 0 {
+				if sendErr := invoker.Send(ctx, buf[:n]); sendErr != nil {
+					errCh <- fmt.Errorf("failed to send data to binding: %w", sendErr)
+					return
+				}
+			}
+			if readErr == io.EOF {
+				if closeErr := invoker.CloseSend(); closeErr != nil {
+					errCh <- fmt.Errorf("failed to close send: %w", closeErr)
+					return
+				}
+				errCh <- nil
+				return
+			}
+			if readErr != nil {
+				errCh <- fmt.Errorf("failed to read data: %w", readErr)
+				return
+			}
+		}
+	}()
+
+	// Read first response from the binding to get metadata
+	// The first Recv() processes the initial response and populates metadata
+	firstData, recvErr := invoker.Recv(ctx)
+	if recvErr != nil && recvErr != io.EOF {
+		return fmt.Errorf("failed to receive initial response from binding: %w", recvErr)
+	}
+
+	// Send initial response with metadata (now populated by the first Recv call)
+	initialResp := &runtimev1pb.InvokeBindingStreamResponse{
+		InvokeBindingStreamResponseType: &runtimev1pb.InvokeBindingStreamResponse_InitialResponse{
+			InitialResponse: &runtimev1pb.InvokeBindingStreamResponseInitial{
+				Metadata: invoker.GetResponseMetadata(),
+			},
+		},
+	}
+	if err := stream.Send(initialResp); err != nil {
+		return fmt.Errorf("failed to send initial response: %w", err)
+	}
+
+	// Send first data chunk if we received data (not just EOF)
+	var seq uint64
+	if recvErr != io.EOF && len(firstData) > 0 {
+		resp := &runtimev1pb.InvokeBindingStreamResponse{
+			InvokeBindingStreamResponseType: &runtimev1pb.InvokeBindingStreamResponse_Payload{
+				Payload: &commonv1pb.StreamPayload{
+					Data: firstData,
+					Seq:  seq,
+				},
+			},
+		}
+		if err := stream.Send(resp); err != nil {
+			return fmt.Errorf("failed to send response chunk: %w", err)
+		}
+		seq++
+	}
+
+	// If first recv was EOF, we're done
+	if recvErr == io.EOF {
+		// Wait for send goroutine to complete
+		if err := <-errCh; err != nil {
+			return err
+		}
+		return nil
+	}
+
+	// Read remaining responses from the binding and stream to client
+	for {
+		respData, recvErr := invoker.Recv(ctx)
+		if recvErr == io.EOF {
+			break
+		}
+		if recvErr != nil {
+			return fmt.Errorf("failed to receive from binding: %w", recvErr)
+		}
+
+		resp := &runtimev1pb.InvokeBindingStreamResponse{
+			InvokeBindingStreamResponseType: &runtimev1pb.InvokeBindingStreamResponse_Payload{
+				Payload: &commonv1pb.StreamPayload{
+					Data: respData,
+					Seq:  seq,
+				},
+			},
+		}
+		if err := stream.Send(resp); err != nil {
+			return fmt.Errorf("failed to send response chunk: %w", err)
+		}
+		seq++
+	}
+
+	// Wait for send goroutine to complete
+	if err := <-errCh; err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// sendToOutputBindingStreamFallback buffers all input data and uses the non-streaming Invoke method.
+func (b *binding) sendToOutputBindingStreamFallback(
+	ctx context.Context,
+	stream runtimev1pb.Dapr_InvokeBindingAlpha1Server,
+	name string,
+	binding bindings.OutputBinding,
+	initialReq *runtimev1pb.InvokeBindingStreamRequestInitial,
+	data io.Reader,
+) error {
+	// Read all data into memory
+	allData, err := io.ReadAll(data)
+	if err != nil {
+		return fmt.Errorf("failed to read request data: %w", err)
+	}
+
+	// Create the invoke request
+	req := &bindings.InvokeRequest{
+		Data:      allData,
+		Metadata:  initialReq.GetMetadata(),
+		Operation: bindings.OperationKind(initialReq.GetOperation()),
+	}
+
+	// Invoke the binding with resiliency
+	policyRunner := resiliency.NewRunner[*bindings.InvokeResponse](ctx,
+		b.resiliency.ComponentOutboundPolicy(name, resiliency.Binding),
+	)
+	resp, err := policyRunner(func(ctx context.Context) (*bindings.InvokeResponse, error) {
+		return binding.Invoke(ctx, req)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to invoke binding: %w", err)
+	}
+
+	// Send initial response with metadata
+	initialResp := &runtimev1pb.InvokeBindingStreamResponse{
+		InvokeBindingStreamResponseType: &runtimev1pb.InvokeBindingStreamResponse_InitialResponse{
+			InitialResponse: &runtimev1pb.InvokeBindingStreamResponseInitial{
+				Metadata: resp.Metadata,
+			},
+		},
+	}
+	if err := stream.Send(initialResp); err != nil {
+		return fmt.Errorf("failed to send initial response: %w", err)
+	}
+
+	// Send response data in chunks to avoid gRPC message size limits
+	if len(resp.Data) > 0 {
+		var seq uint64
+		for i := 0; i < len(resp.Data); i += streamBufferSize {
+			end := i + streamBufferSize
+			if end > len(resp.Data) {
+				end = len(resp.Data)
+			}
+			dataResp := &runtimev1pb.InvokeBindingStreamResponse{
+				InvokeBindingStreamResponseType: &runtimev1pb.InvokeBindingStreamResponse_Payload{
+					Payload: &commonv1pb.StreamPayload{
+						Data: resp.Data[i:end],
+						Seq:  seq,
+					},
+				},
+			}
+			if err := stream.Send(dataResp); err != nil {
+				return fmt.Errorf("failed to send response data chunk: %w", err)
+			}
+			seq++
+		}
+	}
+
+	return nil
+}
+
+// SendToOutputBindingStreamHTTP handles streaming output binding invocations for HTTP.
+// It reads data from the input reader and returns the response data.
+// For bindings that don't support streaming, it falls back to buffered invocation.
+func (b *binding) SendToOutputBindingStreamHTTP(
+	ctx context.Context,
+	name string,
+	operation string,
+	metadata map[string]string,
+	data io.Reader,
+) (*OutputBindingStreamHTTPResult, error) {
+	op := bindings.OperationKind(operation)
+	if op == "" {
+		return nil, errors.New("operation field is missing from request")
+	}
+
+	binding, ok := b.compStore.GetOutputBinding(name)
+	if !ok {
+		return nil, fmt.Errorf("couldn't find output binding %s", name)
+	}
+
+	// Check if operation is supported
+	ops := binding.Operations()
+	var operationSupported bool
+	for _, o := range ops {
+		if o == op {
+			operationSupported = true
+			break
+		}
+	}
+	if !operationSupported {
+		supported := make([]string, 0, len(ops))
+		for _, o := range ops {
+			supported = append(supported, string(o))
+		}
+		return nil, fmt.Errorf("binding %s does not support operation %s. supported operations:%s", name, op, strings.Join(supported, " "))
+	}
+
+	// Check if the binding supports streaming
+	streamingBinding, isStreaming := binding.(bindingsLoader.StreamingOutputBinding)
+	if isStreaming {
+		return b.sendToOutputBindingStreamHTTPNative(ctx, name, streamingBinding, op, metadata, data)
+	}
+
+	// Fallback to buffered approach for non-streaming bindings
+	return b.sendToOutputBindingStreamHTTPFallback(ctx, name, binding, op, metadata, data)
+}
+
+// sendToOutputBindingStreamHTTPNative uses the native streaming interface of the binding.
+func (b *binding) sendToOutputBindingStreamHTTPNative(
+	ctx context.Context,
+	name string,
+	binding bindingsLoader.StreamingOutputBinding,
+	operation bindings.OperationKind,
+	metadata map[string]string,
+	data io.Reader,
+) (*OutputBindingStreamHTTPResult, error) {
+	// Create streaming request
+	streamReq := &bindingsLoader.StreamInvokeRequest{
+		Operation: operation,
+		Metadata:  metadata,
+	}
+
+	// Invoke the streaming binding
+	invoker, err := binding.InvokeStream(ctx, streamReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to invoke streaming binding: %w", err)
+	}
+	defer invoker.Close()
+
+	// Start goroutine to send data to the binding
+	errCh := make(chan error, 1)
+	go func() {
+		buf := make([]byte, streamBufferSize)
+		for {
+			n, readErr := data.Read(buf)
+			if n > 0 {
+				if sendErr := invoker.Send(ctx, buf[:n]); sendErr != nil {
+					errCh <- fmt.Errorf("failed to send data to binding: %w", sendErr)
+					return
+				}
+			}
+			if readErr == io.EOF {
+				if closeErr := invoker.CloseSend(); closeErr != nil {
+					errCh <- fmt.Errorf("failed to close send: %w", closeErr)
+					return
+				}
+				errCh <- nil
+				return
+			}
+			if readErr != nil {
+				errCh <- fmt.Errorf("failed to read data: %w", readErr)
+				return
+			}
+		}
+	}()
+
+	// Read all responses from the binding
+	var responseData []byte
+	for {
+		respData, recvErr := invoker.Recv(ctx)
+		if recvErr == io.EOF {
+			break
+		}
+		if recvErr != nil {
+			return nil, fmt.Errorf("failed to receive from binding: %w", recvErr)
+		}
+		responseData = append(responseData, respData...)
+	}
+
+	// Wait for send goroutine to complete
+	if err := <-errCh; err != nil {
+		return nil, err
+	}
+
+	return &OutputBindingStreamHTTPResult{
+		Data:        responseData,
+		Metadata:    invoker.GetResponseMetadata(),
+		ContentType: invoker.GetContentType(),
+	}, nil
+}
+
+// sendToOutputBindingStreamHTTPFallback buffers all input data and uses the non-streaming Invoke method.
+func (b *binding) sendToOutputBindingStreamHTTPFallback(
+	ctx context.Context,
+	name string,
+	binding bindings.OutputBinding,
+	operation bindings.OperationKind,
+	metadata map[string]string,
+	data io.Reader,
+) (*OutputBindingStreamHTTPResult, error) {
+	// Read all data into memory
+	allData, err := io.ReadAll(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read request data: %w", err)
+	}
+
+	// Create the invoke request
+	req := &bindings.InvokeRequest{
+		Data:      allData,
+		Metadata:  metadata,
+		Operation: operation,
+	}
+
+	// Invoke the binding with resiliency
+	policyRunner := resiliency.NewRunner[*bindings.InvokeResponse](ctx,
+		b.resiliency.ComponentOutboundPolicy(name, resiliency.Binding),
+	)
+	resp, err := policyRunner(func(ctx context.Context) (*bindings.InvokeResponse, error) {
+		return binding.Invoke(ctx, req)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to invoke binding: %w", err)
+	}
+
+	var contentType string
+	if resp.ContentType != nil {
+		contentType = *resp.ContentType
+	}
+
+	return &OutputBindingStreamHTTPResult{
+		Data:        resp.Data,
+		Metadata:    resp.Metadata,
+		ContentType: contentType,
+	}, nil
 }
 
 func (b *binding) onAppResponse(ctx context.Context, response *bindings.AppResponse) error {

@@ -51,6 +51,9 @@ var endpoints = map[string][]string{
 	"bindings.v1": {
 		daprRuntimePrefix + "v1.Dapr/InvokeBinding",
 	},
+	"bindings.v1alpha1": {
+		daprRuntimePrefix + "v1.Dapr/InvokeBindingAlpha1",
+	},
 	"secrets.v1": {
 		daprRuntimePrefix + "v1.Dapr/GetSecret",
 		daprRuntimePrefix + "v1.Dapr/GetBulkSecret",

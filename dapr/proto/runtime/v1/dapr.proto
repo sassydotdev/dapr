@@ -82,6 +82,10 @@ service Dapr {
   // Invokes binding data to specific output bindings
   rpc InvokeBinding(InvokeBindingRequest) returns (InvokeBindingResponse) {}
 
+  // InvokeBindingAlpha1 invokes binding data to specific output bindings with
+  // bidirectional streaming support. Both request and response data are streamed.
+  rpc InvokeBindingAlpha1(stream InvokeBindingStreamRequest) returns (stream InvokeBindingStreamResponse) {}
+
   // Gets secrets from secret stores.
   rpc GetSecret(GetSecretRequest) returns (GetSecretResponse) {}
 

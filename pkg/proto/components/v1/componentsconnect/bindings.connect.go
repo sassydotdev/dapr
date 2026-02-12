@@ -57,6 +57,9 @@ const (
 	OutputBindingInitProcedure = "/dapr.proto.components.v1.OutputBinding/Init"
 	// OutputBindingInvokeProcedure is the fully-qualified name of the OutputBinding's Invoke RPC.
 	OutputBindingInvokeProcedure = "/dapr.proto.components.v1.OutputBinding/Invoke"
+	// OutputBindingInvokeStreamProcedure is the fully-qualified name of the OutputBinding's
+	// InvokeStream RPC.
+	OutputBindingInvokeStreamProcedure = "/dapr.proto.components.v1.OutputBinding/InvokeStream"
 	// OutputBindingListOperationsProcedure is the fully-qualified name of the OutputBinding's
 	// ListOperations RPC.
 	OutputBindingListOperationsProcedure = "/dapr.proto.components.v1.OutputBinding/ListOperations"
@@ -196,6 +199,12 @@ type OutputBindingClient interface {
 	Init(context.Context, *connect.Request[v1.OutputBindingInitRequest]) (*connect.Response[v1.OutputBindingInitResponse], error)
 	// Invoke remote systems with optional payloads.
 	Invoke(context.Context, *connect.Request[v1.InvokeRequest]) (*connect.Response[v1.InvokeResponse], error)
+	// InvokeStream invokes remote systems with bidirectional streaming support.
+	// The first request message must contain initial_request with operation and metadata.
+	// Subsequent request messages contain data chunks.
+	// The first response message contains initial_response with metadata.
+	// Subsequent response messages contain data chunks.
+	InvokeStream(context.Context) *connect.BidiStreamForClient[v1.InvokeStreamRequest, v1.InvokeStreamResponse]
 	// ListOperations list system supported operations.
 	ListOperations(context.Context, *connect.Request[v1.ListOperationsRequest]) (*connect.Response[v1.ListOperationsResponse], error)
 	// Ping the OutputBinding. Used for liveness porpuses.
@@ -222,6 +231,11 @@ func NewOutputBindingClient(httpClient connect.HTTPClient, baseURL string, opts 
 			baseURL+OutputBindingInvokeProcedure,
 			opts...,
 		),
+		invokeStream: connect.NewClient[v1.InvokeStreamRequest, v1.InvokeStreamResponse](
+			httpClient,
+			baseURL+OutputBindingInvokeStreamProcedure,
+			opts...,
+		),
 		listOperations: connect.NewClient[v1.ListOperationsRequest, v1.ListOperationsResponse](
 			httpClient,
 			baseURL+OutputBindingListOperationsProcedure,
@@ -239,6 +253,7 @@ func NewOutputBindingClient(httpClient connect.HTTPClient, baseURL string, opts 
 type outputBindingClient struct {
 	init           *connect.Client[v1.OutputBindingInitRequest, v1.OutputBindingInitResponse]
 	invoke         *connect.Client[v1.InvokeRequest, v1.InvokeResponse]
+	invokeStream   *connect.Client[v1.InvokeStreamRequest, v1.InvokeStreamResponse]
 	listOperations *connect.Client[v1.ListOperationsRequest, v1.ListOperationsResponse]
 	ping           *connect.Client[v1.PingRequest, v1.PingResponse]
 }
@@ -251,6 +266,11 @@ func (c *outputBindingClient) Init(ctx context.Context, req *connect.Request[v1.
 // Invoke calls dapr.proto.components.v1.OutputBinding.Invoke.
 func (c *outputBindingClient) Invoke(ctx context.Context, req *connect.Request[v1.InvokeRequest]) (*connect.Response[v1.InvokeResponse], error) {
 	return c.invoke.CallUnary(ctx, req)
+}
+
+// InvokeStream calls dapr.proto.components.v1.OutputBinding.InvokeStream.
+func (c *outputBindingClient) InvokeStream(ctx context.Context) *connect.BidiStreamForClient[v1.InvokeStreamRequest, v1.InvokeStreamResponse] {
+	return c.invokeStream.CallBidiStream(ctx)
 }
 
 // ListOperations calls dapr.proto.components.v1.OutputBinding.ListOperations.
@@ -269,6 +289,12 @@ type OutputBindingHandler interface {
 	Init(context.Context, *connect.Request[v1.OutputBindingInitRequest]) (*connect.Response[v1.OutputBindingInitResponse], error)
 	// Invoke remote systems with optional payloads.
 	Invoke(context.Context, *connect.Request[v1.InvokeRequest]) (*connect.Response[v1.InvokeResponse], error)
+	// InvokeStream invokes remote systems with bidirectional streaming support.
+	// The first request message must contain initial_request with operation and metadata.
+	// Subsequent request messages contain data chunks.
+	// The first response message contains initial_response with metadata.
+	// Subsequent response messages contain data chunks.
+	InvokeStream(context.Context, *connect.BidiStream[v1.InvokeStreamRequest, v1.InvokeStreamResponse]) error
 	// ListOperations list system supported operations.
 	ListOperations(context.Context, *connect.Request[v1.ListOperationsRequest]) (*connect.Response[v1.ListOperationsResponse], error)
 	// Ping the OutputBinding. Used for liveness porpuses.
@@ -291,6 +317,11 @@ func NewOutputBindingHandler(svc OutputBindingHandler, opts ...connect.HandlerOp
 		svc.Invoke,
 		opts...,
 	)
+	outputBindingInvokeStreamHandler := connect.NewBidiStreamHandler(
+		OutputBindingInvokeStreamProcedure,
+		svc.InvokeStream,
+		opts...,
+	)
 	outputBindingListOperationsHandler := connect.NewUnaryHandler(
 		OutputBindingListOperationsProcedure,
 		svc.ListOperations,
@@ -307,6 +338,8 @@ func NewOutputBindingHandler(svc OutputBindingHandler, opts ...connect.HandlerOp
 			outputBindingInitHandler.ServeHTTP(w, r)
 		case OutputBindingInvokeProcedure:
 			outputBindingInvokeHandler.ServeHTTP(w, r)
+		case OutputBindingInvokeStreamProcedure:
+			outputBindingInvokeStreamHandler.ServeHTTP(w, r)
 		case OutputBindingListOperationsProcedure:
 			outputBindingListOperationsHandler.ServeHTTP(w, r)
 		case OutputBindingPingProcedure:
@@ -326,6 +359,10 @@ func (UnimplementedOutputBindingHandler) Init(context.Context, *connect.Request[
 
 func (UnimplementedOutputBindingHandler) Invoke(context.Context, *connect.Request[v1.InvokeRequest]) (*connect.Response[v1.InvokeResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("dapr.proto.components.v1.OutputBinding.Invoke is not implemented"))
+}
+
+func (UnimplementedOutputBindingHandler) InvokeStream(context.Context, *connect.BidiStream[v1.InvokeStreamRequest, v1.InvokeStreamResponse]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("dapr.proto.components.v1.OutputBinding.InvokeStream is not implemented"))
 }
 
 func (UnimplementedOutputBindingHandler) ListOperations(context.Context, *connect.Request[v1.ListOperationsRequest]) (*connect.Response[v1.ListOperationsResponse], error) {

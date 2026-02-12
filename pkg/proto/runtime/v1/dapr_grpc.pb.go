@@ -46,6 +46,7 @@ const (
 	Dapr_BulkPublishEvent_FullMethodName               = "/dapr.proto.runtime.v1.Dapr/BulkPublishEvent"
 	Dapr_SubscribeTopicEventsAlpha1_FullMethodName     = "/dapr.proto.runtime.v1.Dapr/SubscribeTopicEventsAlpha1"
 	Dapr_InvokeBinding_FullMethodName                  = "/dapr.proto.runtime.v1.Dapr/InvokeBinding"
+	Dapr_InvokeBindingAlpha1_FullMethodName            = "/dapr.proto.runtime.v1.Dapr/InvokeBindingAlpha1"
 	Dapr_GetSecret_FullMethodName                      = "/dapr.proto.runtime.v1.Dapr/GetSecret"
 	Dapr_GetBulkSecret_FullMethodName                  = "/dapr.proto.runtime.v1.Dapr/GetBulkSecret"
 	Dapr_RegisterActorTimer_FullMethodName             = "/dapr.proto.runtime.v1.Dapr/RegisterActorTimer"
@@ -134,6 +135,9 @@ type DaprClient interface {
 	SubscribeTopicEventsAlpha1(ctx context.Context, opts ...grpc.CallOption) (Dapr_SubscribeTopicEventsAlpha1Client, error)
 	// Invokes binding data to specific output bindings
 	InvokeBinding(ctx context.Context, in *InvokeBindingRequest, opts ...grpc.CallOption) (*InvokeBindingResponse, error)
+	// InvokeBindingAlpha1 invokes binding data to specific output bindings with
+	// bidirectional streaming support. Both request and response data are streamed.
+	InvokeBindingAlpha1(ctx context.Context, opts ...grpc.CallOption) (Dapr_InvokeBindingAlpha1Client, error)
 	// Gets secrets from secret stores.
 	GetSecret(ctx context.Context, in *GetSecretRequest, opts ...grpc.CallOption) (*GetSecretResponse, error)
 	// Gets a bulk of secrets
@@ -393,6 +397,37 @@ func (c *daprClient) InvokeBinding(ctx context.Context, in *InvokeBindingRequest
 	return out, nil
 }
 
+func (c *daprClient) InvokeBindingAlpha1(ctx context.Context, opts ...grpc.CallOption) (Dapr_InvokeBindingAlpha1Client, error) {
+	stream, err := c.cc.NewStream(ctx, &Dapr_ServiceDesc.Streams[1], Dapr_InvokeBindingAlpha1_FullMethodName, opts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &daprInvokeBindingAlpha1Client{stream}
+	return x, nil
+}
+
+type Dapr_InvokeBindingAlpha1Client interface {
+	Send(*InvokeBindingStreamRequest) error
+	Recv() (*InvokeBindingStreamResponse, error)
+	grpc.ClientStream
+}
+
+type daprInvokeBindingAlpha1Client struct {
+	grpc.ClientStream
+}
+
+func (x *daprInvokeBindingAlpha1Client) Send(m *InvokeBindingStreamRequest) error {
+	return x.ClientStream.SendMsg(m)
+}
+
+func (x *daprInvokeBindingAlpha1Client) Recv() (*InvokeBindingStreamResponse, error) {
+	m := new(InvokeBindingStreamResponse)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
 func (c *daprClient) GetSecret(ctx context.Context, in *GetSecretRequest, opts ...grpc.CallOption) (*GetSecretResponse, error) {
 	out := new(GetSecretResponse)
 	err := c.cc.Invoke(ctx, Dapr_GetSecret_FullMethodName, in, out, opts...)
@@ -520,7 +555,7 @@ func (c *daprClient) GetConfiguration(ctx context.Context, in *GetConfigurationR
 }
 
 func (c *daprClient) SubscribeConfigurationAlpha1(ctx context.Context, in *SubscribeConfigurationRequest, opts ...grpc.CallOption) (Dapr_SubscribeConfigurationAlpha1Client, error) {
-	stream, err := c.cc.NewStream(ctx, &Dapr_ServiceDesc.Streams[1], Dapr_SubscribeConfigurationAlpha1_FullMethodName, opts...)
+	stream, err := c.cc.NewStream(ctx, &Dapr_ServiceDesc.Streams[2], Dapr_SubscribeConfigurationAlpha1_FullMethodName, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -552,7 +587,7 @@ func (x *daprSubscribeConfigurationAlpha1Client) Recv() (*SubscribeConfiguration
 }
 
 func (c *daprClient) SubscribeConfiguration(ctx context.Context, in *SubscribeConfigurationRequest, opts ...grpc.CallOption) (Dapr_SubscribeConfigurationClient, error) {
-	stream, err := c.cc.NewStream(ctx, &Dapr_ServiceDesc.Streams[2], Dapr_SubscribeConfiguration_FullMethodName, opts...)
+	stream, err := c.cc.NewStream(ctx, &Dapr_ServiceDesc.Streams[3], Dapr_SubscribeConfiguration_FullMethodName, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -620,7 +655,7 @@ func (c *daprClient) UnlockAlpha1(ctx context.Context, in *UnlockRequest, opts .
 }
 
 func (c *daprClient) EncryptAlpha1(ctx context.Context, opts ...grpc.CallOption) (Dapr_EncryptAlpha1Client, error) {
-	stream, err := c.cc.NewStream(ctx, &Dapr_ServiceDesc.Streams[3], Dapr_EncryptAlpha1_FullMethodName, opts...)
+	stream, err := c.cc.NewStream(ctx, &Dapr_ServiceDesc.Streams[4], Dapr_EncryptAlpha1_FullMethodName, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -651,7 +686,7 @@ func (x *daprEncryptAlpha1Client) Recv() (*EncryptResponse, error) {
 }
 
 func (c *daprClient) DecryptAlpha1(ctx context.Context, opts ...grpc.CallOption) (Dapr_DecryptAlpha1Client, error) {
-	stream, err := c.cc.NewStream(ctx, &Dapr_ServiceDesc.Streams[4], Dapr_DecryptAlpha1_FullMethodName, opts...)
+	stream, err := c.cc.NewStream(ctx, &Dapr_ServiceDesc.Streams[5], Dapr_DecryptAlpha1_FullMethodName, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1000,6 +1035,9 @@ type DaprServer interface {
 	SubscribeTopicEventsAlpha1(Dapr_SubscribeTopicEventsAlpha1Server) error
 	// Invokes binding data to specific output bindings
 	InvokeBinding(context.Context, *InvokeBindingRequest) (*InvokeBindingResponse, error)
+	// InvokeBindingAlpha1 invokes binding data to specific output bindings with
+	// bidirectional streaming support. Both request and response data are streamed.
+	InvokeBindingAlpha1(Dapr_InvokeBindingAlpha1Server) error
 	// Gets secrets from secret stores.
 	GetSecret(context.Context, *GetSecretRequest) (*GetSecretResponse, error)
 	// Gets a bulk of secrets
@@ -1153,6 +1191,9 @@ func (UnimplementedDaprServer) SubscribeTopicEventsAlpha1(Dapr_SubscribeTopicEve
 }
 func (UnimplementedDaprServer) InvokeBinding(context.Context, *InvokeBindingRequest) (*InvokeBindingResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method InvokeBinding not implemented")
+}
+func (UnimplementedDaprServer) InvokeBindingAlpha1(Dapr_InvokeBindingAlpha1Server) error {
+	return status.Errorf(codes.Unimplemented, "method InvokeBindingAlpha1 not implemented")
 }
 func (UnimplementedDaprServer) GetSecret(context.Context, *GetSecretRequest) (*GetSecretResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetSecret not implemented")
@@ -1565,6 +1606,32 @@ func _Dapr_InvokeBinding_Handler(srv interface{}, ctx context.Context, dec func(
 		return srv.(DaprServer).InvokeBinding(ctx, req.(*InvokeBindingRequest))
 	}
 	return interceptor(ctx, in, info, handler)
+}
+
+func _Dapr_InvokeBindingAlpha1_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(DaprServer).InvokeBindingAlpha1(&daprInvokeBindingAlpha1Server{stream})
+}
+
+type Dapr_InvokeBindingAlpha1Server interface {
+	Send(*InvokeBindingStreamResponse) error
+	Recv() (*InvokeBindingStreamRequest, error)
+	grpc.ServerStream
+}
+
+type daprInvokeBindingAlpha1Server struct {
+	grpc.ServerStream
+}
+
+func (x *daprInvokeBindingAlpha1Server) Send(m *InvokeBindingStreamResponse) error {
+	return x.ServerStream.SendMsg(m)
+}
+
+func (x *daprInvokeBindingAlpha1Server) Recv() (*InvokeBindingStreamRequest, error) {
+	m := new(InvokeBindingStreamRequest)
+	if err := x.ServerStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
 func _Dapr_GetSecret_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -2799,6 +2866,12 @@ var Dapr_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "SubscribeTopicEventsAlpha1",
 			Handler:       _Dapr_SubscribeTopicEventsAlpha1_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+		{
+			StreamName:    "InvokeBindingAlpha1",
+			Handler:       _Dapr_InvokeBindingAlpha1_Handler,
 			ServerStreams: true,
 			ClientStreams: true,
 		},

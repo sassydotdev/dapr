@@ -76,6 +76,9 @@ const (
 	DaprSubscribeTopicEventsAlpha1Procedure = "/dapr.proto.runtime.v1.Dapr/SubscribeTopicEventsAlpha1"
 	// DaprInvokeBindingProcedure is the fully-qualified name of the Dapr's InvokeBinding RPC.
 	DaprInvokeBindingProcedure = "/dapr.proto.runtime.v1.Dapr/InvokeBinding"
+	// DaprInvokeBindingAlpha1Procedure is the fully-qualified name of the Dapr's InvokeBindingAlpha1
+	// RPC.
+	DaprInvokeBindingAlpha1Procedure = "/dapr.proto.runtime.v1.Dapr/InvokeBindingAlpha1"
 	// DaprGetSecretProcedure is the fully-qualified name of the Dapr's GetSecret RPC.
 	DaprGetSecretProcedure = "/dapr.proto.runtime.v1.Dapr/GetSecret"
 	// DaprGetBulkSecretProcedure is the fully-qualified name of the Dapr's GetBulkSecret RPC.
@@ -240,6 +243,9 @@ type DaprClient interface {
 	SubscribeTopicEventsAlpha1(context.Context) *connect.BidiStreamForClient[v1.SubscribeTopicEventsRequestAlpha1, v1.SubscribeTopicEventsResponseAlpha1]
 	// Invokes binding data to specific output bindings
 	InvokeBinding(context.Context, *connect.Request[v1.InvokeBindingRequest]) (*connect.Response[v1.InvokeBindingResponse], error)
+	// InvokeBindingAlpha1 invokes binding data to specific output bindings with
+	// bidirectional streaming support. Both request and response data are streamed.
+	InvokeBindingAlpha1(context.Context) *connect.BidiStreamForClient[v1.InvokeBindingStreamRequest, v1.InvokeBindingStreamResponse]
 	// Gets secrets from secret stores.
 	GetSecret(context.Context, *connect.Request[v1.GetSecretRequest]) (*connect.Response[v1.GetSecretResponse], error)
 	// Gets a bulk of secrets
@@ -431,6 +437,11 @@ func NewDaprClient(httpClient connect.HTTPClient, baseURL string, opts ...connec
 		invokeBinding: connect.NewClient[v1.InvokeBindingRequest, v1.InvokeBindingResponse](
 			httpClient,
 			baseURL+DaprInvokeBindingProcedure,
+			opts...,
+		),
+		invokeBindingAlpha1: connect.NewClient[v1.InvokeBindingStreamRequest, v1.InvokeBindingStreamResponse](
+			httpClient,
+			baseURL+DaprInvokeBindingAlpha1Procedure,
 			opts...,
 		),
 		getSecret: connect.NewClient[v1.GetSecretRequest, v1.GetSecretResponse](
@@ -716,6 +727,7 @@ type daprClient struct {
 	bulkPublishEvent               *connect.Client[v1.BulkPublishRequest, v1.BulkPublishResponse]
 	subscribeTopicEventsAlpha1     *connect.Client[v1.SubscribeTopicEventsRequestAlpha1, v1.SubscribeTopicEventsResponseAlpha1]
 	invokeBinding                  *connect.Client[v1.InvokeBindingRequest, v1.InvokeBindingResponse]
+	invokeBindingAlpha1            *connect.Client[v1.InvokeBindingStreamRequest, v1.InvokeBindingStreamResponse]
 	getSecret                      *connect.Client[v1.GetSecretRequest, v1.GetSecretResponse]
 	getBulkSecret                  *connect.Client[v1.GetBulkSecretRequest, v1.GetBulkSecretResponse]
 	registerActorTimer             *connect.Client[v1.RegisterActorTimerRequest, emptypb.Empty]
@@ -836,6 +848,11 @@ func (c *daprClient) SubscribeTopicEventsAlpha1(ctx context.Context) *connect.Bi
 // InvokeBinding calls dapr.proto.runtime.v1.Dapr.InvokeBinding.
 func (c *daprClient) InvokeBinding(ctx context.Context, req *connect.Request[v1.InvokeBindingRequest]) (*connect.Response[v1.InvokeBindingResponse], error) {
 	return c.invokeBinding.CallUnary(ctx, req)
+}
+
+// InvokeBindingAlpha1 calls dapr.proto.runtime.v1.Dapr.InvokeBindingAlpha1.
+func (c *daprClient) InvokeBindingAlpha1(ctx context.Context) *connect.BidiStreamForClient[v1.InvokeBindingStreamRequest, v1.InvokeBindingStreamResponse] {
+	return c.invokeBindingAlpha1.CallBidiStream(ctx)
 }
 
 // GetSecret calls dapr.proto.runtime.v1.Dapr.GetSecret.
@@ -1149,6 +1166,9 @@ type DaprHandler interface {
 	SubscribeTopicEventsAlpha1(context.Context, *connect.BidiStream[v1.SubscribeTopicEventsRequestAlpha1, v1.SubscribeTopicEventsResponseAlpha1]) error
 	// Invokes binding data to specific output bindings
 	InvokeBinding(context.Context, *connect.Request[v1.InvokeBindingRequest]) (*connect.Response[v1.InvokeBindingResponse], error)
+	// InvokeBindingAlpha1 invokes binding data to specific output bindings with
+	// bidirectional streaming support. Both request and response data are streamed.
+	InvokeBindingAlpha1(context.Context, *connect.BidiStream[v1.InvokeBindingStreamRequest, v1.InvokeBindingStreamResponse]) error
 	// Gets secrets from secret stores.
 	GetSecret(context.Context, *connect.Request[v1.GetSecretRequest]) (*connect.Response[v1.GetSecretResponse], error)
 	// Gets a bulk of secrets
@@ -1336,6 +1356,11 @@ func NewDaprHandler(svc DaprHandler, opts ...connect.HandlerOption) (string, htt
 	daprInvokeBindingHandler := connect.NewUnaryHandler(
 		DaprInvokeBindingProcedure,
 		svc.InvokeBinding,
+		opts...,
+	)
+	daprInvokeBindingAlpha1Handler := connect.NewBidiStreamHandler(
+		DaprInvokeBindingAlpha1Procedure,
+		svc.InvokeBindingAlpha1,
 		opts...,
 	)
 	daprGetSecretHandler := connect.NewUnaryHandler(
@@ -1631,6 +1656,8 @@ func NewDaprHandler(svc DaprHandler, opts ...connect.HandlerOption) (string, htt
 			daprSubscribeTopicEventsAlpha1Handler.ServeHTTP(w, r)
 		case DaprInvokeBindingProcedure:
 			daprInvokeBindingHandler.ServeHTTP(w, r)
+		case DaprInvokeBindingAlpha1Procedure:
+			daprInvokeBindingAlpha1Handler.ServeHTTP(w, r)
 		case DaprGetSecretProcedure:
 			daprGetSecretHandler.ServeHTTP(w, r)
 		case DaprGetBulkSecretProcedure:
@@ -1796,6 +1823,10 @@ func (UnimplementedDaprHandler) SubscribeTopicEventsAlpha1(context.Context, *con
 
 func (UnimplementedDaprHandler) InvokeBinding(context.Context, *connect.Request[v1.InvokeBindingRequest]) (*connect.Response[v1.InvokeBindingResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("dapr.proto.runtime.v1.Dapr.InvokeBinding is not implemented"))
+}
+
+func (UnimplementedDaprHandler) InvokeBindingAlpha1(context.Context, *connect.BidiStream[v1.InvokeBindingStreamRequest, v1.InvokeBindingStreamResponse]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("dapr.proto.runtime.v1.Dapr.InvokeBindingAlpha1 is not implemented"))
 }
 
 func (UnimplementedDaprHandler) GetSecret(context.Context, *connect.Request[v1.GetSecretRequest]) (*connect.Response[v1.GetSecretResponse], error) {

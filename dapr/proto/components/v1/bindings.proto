@@ -41,6 +41,13 @@ service OutputBinding {
   // Invoke remote systems with optional payloads.
   rpc Invoke(InvokeRequest) returns (InvokeResponse) {}
 
+  // InvokeStream invokes remote systems with bidirectional streaming support.
+  // The first request message must contain initial_request with operation and metadata.
+  // Subsequent request messages contain data chunks.
+  // The first response message contains initial_response with metadata.
+  // Subsequent response messages contain data chunks.
+  rpc InvokeStream(stream InvokeStreamRequest) returns (stream InvokeStreamResponse) {}
+
   // ListOperations list system supported operations.
   rpc ListOperations(ListOperationsRequest) returns (ListOperationsResponse) {}
 
@@ -119,4 +126,50 @@ message InvokeResponse {
   map<string, string> metadata = 2;
   // The response content-type.
   string content_type = 3;
+}
+
+// InvokeStreamRequest is used for streaming invocation of output bindings.
+// The first message must contain initial_request, subsequent messages contain data chunks.
+message InvokeStreamRequest {
+  oneof invoke_stream_request_type {
+    // Initial request with operation and metadata (must be first message)
+    InvokeStreamRequestInitial initial_request = 1;
+    // Data chunk
+    bytes data = 2;
+  }
+  // Sequence number for ordering (starts at 0, increments by 1)
+  uint64 seq = 3;
+  // Message ID for correlation
+  string message_id = 4;
+}
+
+// InvokeStreamRequestInitial contains the initial configuration for streaming invocation
+message InvokeStreamRequestInitial {
+  // The invoke metadata.
+  map<string, string> metadata = 1;
+  // The system supported operation.
+  string operation = 2;
+}
+
+// InvokeStreamResponse is the streaming response from output binding invocation.
+// The first message contains initial_response with metadata, subsequent messages contain data chunks.
+message InvokeStreamResponse {
+  oneof invoke_stream_response_type {
+    // Initial response acknowledging stream setup
+    InvokeStreamResponseInitial initial_response = 1;
+    // Data chunk
+    bytes data = 2;
+  }
+  // Sequence number for ordering (starts at 0, increments by 1)
+  uint64 seq = 3;
+  // Message ID for correlation
+  string message_id = 4;
+}
+
+// InvokeStreamResponseInitial is sent after stream is established
+message InvokeStreamResponseInitial {
+  // Response metadata from the binding
+  map<string, string> metadata = 1;
+  // The response content-type.
+  string content_type = 2;
 }

@@ -53,6 +53,7 @@ import (
 	runtimev1pb "github.com/dapr/dapr/pkg/proto/runtime/v1"
 	"github.com/dapr/dapr/pkg/resiliency"
 	"github.com/dapr/dapr/pkg/runtime/channels"
+	"github.com/dapr/dapr/pkg/runtime/processor"
 	runtimePubsub "github.com/dapr/dapr/pkg/runtime/pubsub"
 	"github.com/dapr/dapr/utils"
 	kiterrors "github.com/dapr/kit/errors"
@@ -73,6 +74,7 @@ type api struct {
 	pubsubAdapter         runtimePubsub.Adapter
 	outbox                outbox.Outbox
 	sendToOutputBindingFn func(ctx context.Context, name string, req *bindings.InvokeRequest) (*bindings.InvokeResponse, error)
+	processor             *processor.Processor
 	metricSpec            *config.MetricSpec
 	tracingSpec           config.TracingSpec
 	maxRequestBodySize    int64 // In bytes
@@ -117,6 +119,7 @@ type APIOpts struct {
 	PubSubAdapter         runtimePubsub.Adapter
 	Outbox                outbox.Outbox
 	SendToOutputBindingFn func(ctx context.Context, name string, req *bindings.InvokeRequest) (*bindings.InvokeResponse, error)
+	Processor             *processor.Processor
 	TracingSpec           config.TracingSpec
 	MetricSpec            *config.MetricSpec
 	MaxRequestBodySize    int64 // In bytes
@@ -133,6 +136,7 @@ func NewAPI(opts APIOpts) API {
 		pubsubAdapter:         opts.PubSubAdapter,
 		outbox:                opts.Outbox,
 		sendToOutputBindingFn: opts.SendToOutputBindingFn,
+		processor:             opts.Processor,
 		tracingSpec:           opts.TracingSpec,
 		metricSpec:            opts.MetricSpec,
 		maxRequestBodySize:    opts.MaxRequestBodySize,
@@ -317,6 +321,12 @@ func appendBindingsSpanAttributes(r *nethttp.Request, m map[string]string) {
 	m[diagConsts.DBNameSpanAttributeKey] = chi.URLParam(r, nameParam)
 }
 
+var endpointGroupBindingsV1Alpha1 = &endpoints.EndpointGroup{
+	Name:                 endpoints.EndpointGroupBindings,
+	Version:              endpoints.EndpointGroupVersion1alpha1,
+	AppendSpanAttributes: appendBindingsSpanAttributes,
+}
+
 func (a *api) constructBindingsEndpoints() []endpoints.Endpoint {
 	return []endpoints.Endpoint{
 		{
@@ -331,6 +341,16 @@ func (a *api) constructBindingsEndpoints() []endpoints.Endpoint {
 			Handler: a.onOutputBindingMessage,
 			Settings: endpoints.EndpointSettings{
 				Name: "InvokeBinding",
+			},
+		},
+		{
+			Methods: []string{nethttp.MethodPost, nethttp.MethodPut},
+			Route:   "bindings/{name}/stream",
+			Version: apiVersionV1alpha1,
+			Group:   endpointGroupBindingsV1Alpha1,
+			Handler: a.onOutputBindingMessageStream,
+			Settings: endpoints.EndpointSettings{
+				Name: "InvokeBindingStream",
 			},
 		},
 	}
@@ -491,6 +511,105 @@ func (a *api) onOutputBindingMessage(w nethttp.ResponseWriter, r *nethttp.Reques
 		respondWithEmpty(w)
 	} else {
 		respondWithData(w, nethttp.StatusOK, resp.Data)
+	}
+}
+
+// onOutputBindingMessageStream handles streaming output binding invocations.
+// Request: Body contains the streaming data
+// Headers:
+// - dapr-operation (required): The operation to perform
+// - metadata-*: Metadata to pass to the binding
+// Response:
+// - Body: The response data
+// - Headers: metadata-* for response metadata
+func (a *api) onOutputBindingMessageStream(w nethttp.ResponseWriter, r *nethttp.Request) {
+	if a.processor == nil {
+		err := messages.ErrBadRequest.WithFormat("streaming bindings require processor configuration")
+		respondWithError(w, err)
+		log.Debug(err)
+		return
+	}
+
+	name := chi.URLParam(r, nameParam)
+	if name == "" {
+		err := messages.ErrBadRequest.WithFormat("binding name is required")
+		respondWithError(w, err)
+		log.Debug(err)
+		return
+	}
+
+	// Get operation from header or query parameter
+	operation := r.Header.Get("dapr-operation")
+	if operation == "" {
+		operation = r.URL.Query().Get("operation")
+	}
+	if operation == "" {
+		err := messages.ErrBadRequest.WithFormat("operation is required (set dapr-operation header or operation query param)")
+		respondWithError(w, err)
+		log.Debug(err)
+		return
+	}
+
+	// Extract metadata from headers (with metadata- prefix)
+	metadata := make(map[string]string)
+	for key, values := range r.Header {
+		if strings.HasPrefix(strings.ToLower(key), "metadata-") {
+			metaKey := key[len("metadata-"):]
+			if len(values) > 0 {
+				metadata[metaKey] = values[0]
+			}
+		}
+	}
+
+	// Pass the trace context to output binding in metadata
+	if span := diagUtils.SpanFromContext(r.Context()); span != nil {
+		sc := span.SpanContext()
+		if !sc.Equal(trace.SpanContext{}) {
+			metadata[traceparentHeader] = diag.SpanContextToW3CString(sc)
+		}
+		if sc.TraceState().Len() > 0 {
+			metadata[tracestateHeader] = diag.TraceStateToW3CString(sc)
+		}
+	}
+
+	// Handle baggage
+	if baggageHeaders := r.Header.Values(diagConsts.BaggageHeader); len(baggageHeaders) > 0 {
+		baggageString := strings.Join(baggageHeaders, ",")
+		if _, err := otelBaggage.Parse(baggageString); err != nil {
+			resp := messages.NewAPIErrorHTTP(fmt.Sprintf("invalid baggage header: %v", err), errorcodes.CommonMalformedRequest, nethttp.StatusBadRequest)
+			respondWithError(w, resp)
+			return
+		}
+		metadata[diagConsts.BaggageHeader] = baggageString
+	}
+
+	start := time.Now()
+	result, err := a.processor.Binding().SendToOutputBindingStreamHTTP(r.Context(), name, operation, metadata, r.Body)
+	elapsed := diag.ElapsedSince(start)
+
+	diag.DefaultComponentMonitoring.OutputBindingEvent(context.Background(), name, operation, err == nil, elapsed)
+
+	if err != nil {
+		resp := messages.NewAPIErrorHTTP(fmt.Sprintf(messages.ErrInvokeOutputBinding, name, err), errorcodes.BindingInvokeOutputBinding, nethttp.StatusInternalServerError)
+		respondWithError(w, resp)
+		log.Debug(resp)
+		return
+	}
+
+	// Set response metadata headers
+	if result != nil {
+		for k, v := range result.Metadata {
+			w.Header().Add(metadataPrefix+k, v)
+		}
+		if result.ContentType != "" {
+			w.Header().Set(headerContentType, result.ContentType)
+		}
+	}
+
+	if result == nil || len(result.Data) == 0 {
+		respondWithEmpty(w)
+	} else {
+		respondWithData(w, nethttp.StatusOK, result.Data)
 	}
 }
 

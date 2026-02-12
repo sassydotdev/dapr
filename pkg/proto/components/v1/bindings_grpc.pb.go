@@ -240,6 +240,7 @@ var InputBinding_ServiceDesc = grpc.ServiceDesc{
 const (
 	OutputBinding_Init_FullMethodName           = "/dapr.proto.components.v1.OutputBinding/Init"
 	OutputBinding_Invoke_FullMethodName         = "/dapr.proto.components.v1.OutputBinding/Invoke"
+	OutputBinding_InvokeStream_FullMethodName   = "/dapr.proto.components.v1.OutputBinding/InvokeStream"
 	OutputBinding_ListOperations_FullMethodName = "/dapr.proto.components.v1.OutputBinding/ListOperations"
 	OutputBinding_Ping_FullMethodName           = "/dapr.proto.components.v1.OutputBinding/Ping"
 )
@@ -252,6 +253,12 @@ type OutputBindingClient interface {
 	Init(ctx context.Context, in *OutputBindingInitRequest, opts ...grpc.CallOption) (*OutputBindingInitResponse, error)
 	// Invoke remote systems with optional payloads.
 	Invoke(ctx context.Context, in *InvokeRequest, opts ...grpc.CallOption) (*InvokeResponse, error)
+	// InvokeStream invokes remote systems with bidirectional streaming support.
+	// The first request message must contain initial_request with operation and metadata.
+	// Subsequent request messages contain data chunks.
+	// The first response message contains initial_response with metadata.
+	// Subsequent response messages contain data chunks.
+	InvokeStream(ctx context.Context, opts ...grpc.CallOption) (OutputBinding_InvokeStreamClient, error)
 	// ListOperations list system supported operations.
 	ListOperations(ctx context.Context, in *ListOperationsRequest, opts ...grpc.CallOption) (*ListOperationsResponse, error)
 	// Ping the OutputBinding. Used for liveness porpuses.
@@ -284,6 +291,37 @@ func (c *outputBindingClient) Invoke(ctx context.Context, in *InvokeRequest, opt
 	return out, nil
 }
 
+func (c *outputBindingClient) InvokeStream(ctx context.Context, opts ...grpc.CallOption) (OutputBinding_InvokeStreamClient, error) {
+	stream, err := c.cc.NewStream(ctx, &OutputBinding_ServiceDesc.Streams[0], OutputBinding_InvokeStream_FullMethodName, opts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &outputBindingInvokeStreamClient{stream}
+	return x, nil
+}
+
+type OutputBinding_InvokeStreamClient interface {
+	Send(*InvokeStreamRequest) error
+	Recv() (*InvokeStreamResponse, error)
+	grpc.ClientStream
+}
+
+type outputBindingInvokeStreamClient struct {
+	grpc.ClientStream
+}
+
+func (x *outputBindingInvokeStreamClient) Send(m *InvokeStreamRequest) error {
+	return x.ClientStream.SendMsg(m)
+}
+
+func (x *outputBindingInvokeStreamClient) Recv() (*InvokeStreamResponse, error) {
+	m := new(InvokeStreamResponse)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
 func (c *outputBindingClient) ListOperations(ctx context.Context, in *ListOperationsRequest, opts ...grpc.CallOption) (*ListOperationsResponse, error) {
 	out := new(ListOperationsResponse)
 	err := c.cc.Invoke(ctx, OutputBinding_ListOperations_FullMethodName, in, out, opts...)
@@ -310,6 +348,12 @@ type OutputBindingServer interface {
 	Init(context.Context, *OutputBindingInitRequest) (*OutputBindingInitResponse, error)
 	// Invoke remote systems with optional payloads.
 	Invoke(context.Context, *InvokeRequest) (*InvokeResponse, error)
+	// InvokeStream invokes remote systems with bidirectional streaming support.
+	// The first request message must contain initial_request with operation and metadata.
+	// Subsequent request messages contain data chunks.
+	// The first response message contains initial_response with metadata.
+	// Subsequent response messages contain data chunks.
+	InvokeStream(OutputBinding_InvokeStreamServer) error
 	// ListOperations list system supported operations.
 	ListOperations(context.Context, *ListOperationsRequest) (*ListOperationsResponse, error)
 	// Ping the OutputBinding. Used for liveness porpuses.
@@ -325,6 +369,9 @@ func (UnimplementedOutputBindingServer) Init(context.Context, *OutputBindingInit
 }
 func (UnimplementedOutputBindingServer) Invoke(context.Context, *InvokeRequest) (*InvokeResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Invoke not implemented")
+}
+func (UnimplementedOutputBindingServer) InvokeStream(OutputBinding_InvokeStreamServer) error {
+	return status.Errorf(codes.Unimplemented, "method InvokeStream not implemented")
 }
 func (UnimplementedOutputBindingServer) ListOperations(context.Context, *ListOperationsRequest) (*ListOperationsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListOperations not implemented")
@@ -378,6 +425,32 @@ func _OutputBinding_Invoke_Handler(srv interface{}, ctx context.Context, dec fun
 		return srv.(OutputBindingServer).Invoke(ctx, req.(*InvokeRequest))
 	}
 	return interceptor(ctx, in, info, handler)
+}
+
+func _OutputBinding_InvokeStream_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(OutputBindingServer).InvokeStream(&outputBindingInvokeStreamServer{stream})
+}
+
+type OutputBinding_InvokeStreamServer interface {
+	Send(*InvokeStreamResponse) error
+	Recv() (*InvokeStreamRequest, error)
+	grpc.ServerStream
+}
+
+type outputBindingInvokeStreamServer struct {
+	grpc.ServerStream
+}
+
+func (x *outputBindingInvokeStreamServer) Send(m *InvokeStreamResponse) error {
+	return x.ServerStream.SendMsg(m)
+}
+
+func (x *outputBindingInvokeStreamServer) Recv() (*InvokeStreamRequest, error) {
+	m := new(InvokeStreamRequest)
+	if err := x.ServerStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
 func _OutputBinding_ListOperations_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -440,6 +513,13 @@ var OutputBinding_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _OutputBinding_Ping_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "InvokeStream",
+			Handler:       _OutputBinding_InvokeStream_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+	},
 	Metadata: "dapr/proto/components/v1/bindings.proto",
 }
